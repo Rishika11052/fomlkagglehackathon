@@ -119,14 +119,15 @@ def between(cum, a, b):
 def to_csr(cols_list, n, dim, extra_rows=None, extra_cols=None):
     # stack hashed feature columns into a sparse 0/1 matrix (n rows x dim columns)
     T = len(cols_list)
-    idx = np.empty((n, T), dtype=np.int64)
+    idx = np.empty((n, T), dtype=np.int32)                      # 32-bit column ids: half the memory
     for j, x in enumerate(cols_list):
-        idx[:, j] = (x % np.uint64(dim)).astype(np.int64)
+        idx[:, j] = (x % np.uint64(dim)).astype(np.int32)
     if extra_rows is None:                                      # fixed number of features per row
-        indptr = np.arange(0, n * T + 1, T, dtype=np.int64)
+        ptr_type = np.int32 if n * T < 2 ** 31 - 1 else np.int64
+        indptr = np.arange(0, n * T + 1, T, dtype=ptr_type)
         return sp.csr_matrix((np.ones(n * T), idx.ravel(), indptr), shape=(n, dim))
-    rows = np.r_[np.repeat(np.arange(n), T), extra_rows]        # one variable number per row
-    cols = np.r_[idx.ravel(), (extra_cols % np.uint64(dim)).astype(np.int64)]
+    rows = np.r_[np.repeat(np.arange(n), T), extra_rows]        # plus a variable number per row
+    cols = np.r_[idx.ravel(), (extra_cols % np.uint64(dim)).astype(np.int32)]
     return sp.csr_matrix((np.ones(len(rows)), (rows, cols)), shape=(n, dim))
 
 

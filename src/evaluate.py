@@ -1,5 +1,5 @@
 """
-Step 2b: evaluation and experiment logging.
+\ evaluation and experiment logging.
 
 Every model is scored the same way:
     from evaluate import evaluate, print_report, log_result
@@ -56,10 +56,11 @@ def is_valid_tree(heads):
 
 
 # ---------------------------------------------------------------- scoring
-def evaluate(df):
+def evaluate(df, train_vocab=None):
     """df: rows of validation tokens with gold 'head', 'rel' and predicted
     'pred_head', 'pred_rel'. Returns (metrics dict, by-length table, per-relation table).
-    LAS = the Kaggle score (head AND relation correct)."""
+    LAS = the Kaggle score (head AND relation correct).
+    train_vocab: optional set of lowercased training words; adds LAS on unseen words."""
     for col in ["sentence_id", "token_id", "head", "rel", "pred_head", "pred_rel"]:
         assert col in df.columns, f"missing column {col}"
     assert df["pred_head"].notna().all() and df["pred_rel"].notna().all(), "missing predictions"
@@ -75,7 +76,16 @@ def evaluate(df):
         "LAS": both.mean(),                       # labeled attachment score = Kaggle metric
         "head_ok_rel_wrong": (head_ok & ~rel_ok).mean(),   # where LAS is lost to the label
         "head_wrong": (~head_ok).mean(),                    # where LAS is lost to the head
+        
     }
+    
+
+    # ---- words never seen in training (test has more of them than validation)
+    if train_vocab is not None:
+        unseen = ~df["token"].str.lower().isin(train_vocab).to_numpy()
+        m["unseen_pct"] = unseen.mean() * 100                # share of tokens that are unseen
+        m["LAS_unseen"] = both[unseen].mean()                # LAS on those tokens only
+        m["LAS_seen"] = both[~unseen].mean()
 
     # ---- by sentence length
     n_tok = df.groupby("sentence_id", sort=False)["token_id"].transform("size")   # length of each row's sentence
@@ -113,6 +123,9 @@ def print_report(m, by_len=None, per_rel=None, top=15):
           f"LAS {m['LAS']:.4f} | LAS test-weighted {m['LAS_testweighted']:.4f} | "
           f"valid trees {m['valid_tree_pct']:.1f}%")
     print(f"LAS lost: wrong head {m['head_wrong']:.4f}, right head but wrong label {m['head_ok_rel_wrong']:.4f}")
+    if "LAS_unseen" in m:
+        print(f"LAS on unseen words {m['LAS_unseen']:.4f} ({m['unseen_pct']:.1f}% of tokens) | "
+                f"on seen words {m['LAS_seen']:.4f}")
     if by_len is not None:
         print("\nby sentence length:")
         print(by_len.round(4).to_string())
@@ -134,9 +147,10 @@ def git_version():
         return "no-git"
 
 
-def log_result(name, m, params=None, notes=""):
-    """Append one experiment to experiments/results.csv so every result is traceable:
-    when it ran, which code version, which settings, which seed."""
+def log_result(name, m, params=None, notes="", extra=None):
+    """Add one experiment to experiments/results.csv so every result is traceable:
+    when it ran, which code version, which settings, which seed.
+    extra: optional dict of additional columns (e.g. diagnostics)."""
     row = {
         "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "name": name,
@@ -146,13 +160,16 @@ def log_result(name, m, params=None, notes=""):
         "UAS": round(m["UAS"], 4),
         "LA": round(m["LA"], 4),
         "LAS_testweighted": round(m["LAS_testweighted"], 4),
+        "LAS_unseen": round(m["LAS_unseen"], 4) if "LAS_unseen" in m else None,
         "valid_tree_pct": round(m["valid_tree_pct"], 1),
-        "params": json.dumps(params or {}, sort_keys=True),
-        "notes": notes,
     }
+    row.update(extra or {})                                  # diagnostics, training size, ...
+    row["params"] = json.dumps(params or {}, sort_keys=True)
+    row["notes"] = notes
     RESULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    new = not RESULTS_FILE.exists()                          # write the header only once
-    pd.DataFrame([row]).to_csv(RESULTS_FILE, mode="a", header=new, index=False)
+    old = pd.read_csv(RESULTS_FILE) if RESULTS_FILE.exists() else pd.DataFrame()
+    # concat + rewrite (instead of appending) so new columns never misalign old rows
+    pd.concat([old, pd.DataFrame([row])], ignore_index=True).to_csv(RESULTS_FILE, index=False)
     print(f"logged '{name}' -> {RESULTS_FILE.relative_to(ROOT)}")
 
 
