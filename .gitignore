@@ -37,3 +37,4 @@ Thumbs.db
 *.tmpdata/*.csv
 submissions/
 experiments/preds/
+models/
