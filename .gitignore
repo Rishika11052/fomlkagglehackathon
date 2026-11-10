@@ -35,3 +35,5 @@ Thumbs.db
 # Logs and temporary files
 *.log
 *.tmpdata/*.csv
+submissions/
+experiments/preds/
