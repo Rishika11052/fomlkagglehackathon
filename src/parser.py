@@ -11,7 +11,12 @@ submissions/graph_lr_eisner.csv.
   E1      arc scorer + argmax head (self masked)     -> Predicts the head with the highest score without allowing a word to be its own head. Also provides diagnostics.
   E2      arc scorer + single-root Eisner            -> Checks whether using Eisner decoding improves the predictions.
   E3      E2 + relation classifier on PREDICTED heads ->  Predicts relations using the heads predicted by Eisner. This is the actual parser score.
-  E3-gold relation classifier on GOLD heads          -> For comparison: Uses the correct heads instead of predicted ones.
+  E3-gold relation classifier on GOLD heads          -> For comparison: Uses the correct heads instead of predicted ones.    python src/parser.py                 # E4a (default, current best): sampled + top-5 hard negatives
+    python src/parser.py --neg sampled   # E0-E3 (sampled negatives only)
+    python src/parser.py --neg all       # E4b: every candidate head is a negative (partial_fit)
+    python src/parser.py --tags tagger              # E5a: word class = tagger's relation
+    python src/parser.py --tags tagger --dirfeats   # E5b: + tagger's head-direction features
+(--tags tagger needs the tag files: run `python src/tagger.py` once first)
 """
 import time
 import argparse
@@ -41,7 +46,29 @@ REL_PARAMS = dict(loss="log_loss", alpha=1e-6, max_iter=10, tol=None, average=Tr
 RUN_NAME = {"sampled": "E3_lr_eisner_relclf", "hard": "E4a_hard_neg", "all": "E4b_all_cand"}
 SUB_NAME = {"sampled": "graph_lr_eisner", "hard": "E4a_hard_neg", "all": "E4b_all_cand"}
 
+TAGS_DIR = ROOT / "tags"
 
+
+def load_tags(df, split):
+    """Tagger output for df (split = train_oof / val / test), aligned to df's rows by ID.
+    Returns (rel_class, sdir) arrays: the explicit tag -> feature mapping from tagger.py."""
+    path = TAGS_DIR / f"tags_{split}.csv"
+    if not path.exists():
+        raise FileNotFoundError(f"{path} missing: run `python src/tagger.py` first")
+    t = pd.read_csv(path, keep_default_na=False).set_index("ID")
+    assert set(t.index) == set(df["ID"]), f"{path.name} does not match the {split} rows"
+    t = t.loc[df["ID"]]                                   # same order as df
+    return t["rel_class"].to_numpy(dtype=object), t["sdir"].to_numpy(dtype=object)
+
+
+def run_names(mode, tags, dirfeats):
+    # experiment / submission names for each option combination
+    if tags == "majority":
+        return RUN_NAME[mode], SUB_NAME[mode]
+    name = "E5b_tagger_dirfeats" if dirfeats else "E5a_tagger"
+    if mode != "hard":
+        name += f"_{mode}"                                # E5 runs are defined on top of E4a
+    return name, name
 
 # ---------------------------------------------------------------- candidates
 def train_candidates(S, heads, rng):
@@ -220,9 +247,17 @@ def run_and_log(name, df, heads, rels, params, vocab, notes="", extra=None):
 if __name__ == "__main__":
     
     ap = argparse.ArgumentParser()
-    ap.add_argument("--neg", choices=["sampled", "hard", "all"], default="sampled",
+    ap.add_argument("--neg", choices=["sampled", "hard", "all"], default="hard",
                     help="how the arc scorer's negative examples are chosen")
-    mode = ap.parse_args().neg
+    ap.add_argument("--tags", choices=["majority", "tagger"], default="majority",
+                    help="word class feature: word-majority relation or the tagger's relation")
+    ap.add_argument("--dirfeats", action="store_true",
+                    help="add the tagger's predicted head direction as features (needs --tags tagger)")
+    args = ap.parse_args()
+    mode = args.neg
+    if args.dirfeats and args.tags != "tagger":
+        ap.error("--dirfeats needs --tags tagger")
+    run_name, sub_name = run_names(mode, args.tags, args.dirfeats)
 
     t0 = time.time()
     rng = np.random.default_rng(SEED)
@@ -231,15 +266,27 @@ if __name__ == "__main__":
     vocab = set(tr["token"].str.lower())
 
     # Use out-of-fold predictions for training data and classes from the full training split for validation and test data.
-    cls_tr = word_classes_oof(tr)
-    cls_va = word_classes(tr, va)
-    cls_te = word_classes(tr, te)
-    S_tr, S_va, S_te = Sentences(tr, cls_tr), Sentences(va, cls_va), Sentences(te, cls_te)
+    if args.tags == "majority":
+        cls_tr = word_classes_oof(tr)
+        cls_va = word_classes(tr, va)
+        cls_te = word_classes(tr, te)
+        dir_tr = dir_va = dir_te = None
+    else:                                                 # tagger output (also out-of-fold for train)
+        cls_tr, dir_tr = load_tags(tr, "train_oof")
+        cls_va, dir_va = load_tags(va, "val")
+        cls_te, dir_te = load_tags(te, "test")
+        if not args.dirfeats:
+            dir_tr = dir_va = dir_te = None               # E5a: relation part only
+    S_tr, S_va, S_te = (Sentences(tr, cls_tr, dir_tr), Sentences(va, cls_va, dir_va),
+                        Sentences(te, cls_te, dir_te))
     gold_tr, gold_va = tr["head"].to_numpy(), va["head"].to_numpy()
-    print(f"[{time.time() - t0:.0f}s] features ready (mode: --neg {mode})")
+    print(f"[{time.time() - t0:.0f}s] features ready (--neg {mode} --tags {args.tags}"
+          f"{' --dirfeats' if args.dirfeats else ''}) -> {run_name}")
 
     params = {"arc": {k: v for k, v in ARC_PARAMS.items() if k != "random_state"},
               "neg": mode, "n_near": N_NEAR, "n_rand": N_RAND}
+    if args.tags != "majority":
+        params.update(tags=args.tags, dirfeats=args.dirfeats)
     if mode == "hard":
         params["n_hard"] = N_HARD
     extra = {}
@@ -307,9 +354,10 @@ if __name__ == "__main__":
             f"valid trees {m1['valid_tree_pct']:.1f}% -> {m2['valid_tree_pct']:.1f}%")
 
     # E3/ E4a / E4b: Run the relation classifier using the heads predicted by Eisner which is the pipeline
-    m = run_and_log("E3_lr_eisner_relclf", va, heads_eis, predict_rels(S_va, heads_eis, rel_model),
-                     params, vocab, notes="MAIN: relations predicted on predicted heads", extra=extra)
-    print(f"\n{RUN_NAME[mode]}: LAS {m['LAS']:.4f} | E3 reference 0.6972 | rule baseline 0.3755")
+    m = run_and_log(run_name, va, heads_eis, predict_rels(S_va, heads_eis, rel_model),
+                    params, vocab, notes="MAIN: relations predicted on predicted heads", extra=extra)
+    print(f"\n{run_name}: LAS {m['LAS']:.4f} | E4a reference 0.7021 | E3 0.6972 | rule baseline 0.3755")
+
     
 
     if mode == "sampled":
@@ -317,10 +365,14 @@ if __name__ == "__main__":
         run_and_log("E3gold_relclf_on_gold_heads", va, gold_va, predict_rels(S_va, gold_va, rel_model),
                     params, vocab, notes="DIAGNOSTIC ONLY: gold heads")
 
+    # m = run_and_log(run_name, va, heads_eis, predict_rels(S_va, heads_eis, rel_model),
+    #                 params, vocab, notes="MAIN: relations predicted on predicted heads", extra=extra)
+    # print(f"\n{run_name}: LAS {m['LAS']:.4f} | E4a reference 0.7021 | E3 0.6972 | rule baseline 0.3755")
+    
     # ---- save models and write the test submission
     MODELS.mkdir(exist_ok=True)
-    joblib.dump(arc, MODELS / f"arc_{SUB_NAME[mode]}.joblib", compress=3)
+    joblib.dump(arc, MODELS / f"arc_{sub_name}.joblib", compress=3)
     heads_te = decode(score_matrices(S_te, arc), "eisner")
     te_pred = te.assign(pred_head=heads_te, pred_rel=predict_rels(S_te, heads_te, rel_model))
-    make_submission(te_pred, SUB_NAME[mode])
+    make_submission(te_pred, sub_name)
     print(f"[{time.time() - t0:.0f}s] done")

@@ -70,7 +70,7 @@ class Sentences:
     """Store each sentence's token attributes in the order [ROOT, w1, ..., wn, EOS] so a
     word's neighbours are just position -1 / +1. Rows keep the order of df."""
 
-    def __init__(self, df, classes):
+    def __init__(self, df, classes, sdir=None):
         lens = df.groupby("sentence_id", sort=False).size().to_numpy()   # tokens per sentence
         self.lens = lens
         self.n_sent = len(lens)
@@ -97,6 +97,11 @@ class Sentences:
         self.S3 = str_ids(suf3)        # 3-letter suffix
         self.SHP = str_ids(shp)        # word shape
         self.C = str_ids(cls)          # word class (majority relation)
+        self.D = None                  # tagger's predicted head direction (only with --dirfeats)
+        if sdir is not None:
+            dirs = np.full(P, EOS, dtype=object); dirs[root_pos] = ROOT
+            dirs[self.row_pos] = sdir                                    # "L", "R" or "ROOT"
+            self.D = str_ids(dirs)
 
         self.prev = np.arange(P) - 1; self.prev[root_pos] = root_pos     # left neighbour (ROOT stays ROOT)
         self.next = np.arange(P) + 1; self.next[eos_pos] = eos_pos       # right neighbour (EOS stays EOS)
@@ -141,6 +146,8 @@ ARC_TEMPLATES = [
     ("hc", "hcR", "dc", "dcR"), ("hcL", "hc", "dc", "dcR"),
     ("hc", "dc", "npunct"), ("hc", "dc", "comma"), ("hc", "dc", "nverb"),  # in between
 ]
+# extra templates, only when Sentences got sdir (--dirfeats): predicted head direction
+ARC_DIR_TEMPLATES = [("dsd",), ("dsd", "hc"), ("dc", "dsd", "hc"), ("hsd", "dsd")]
 
 
 def arc_features(S, sent, h, d):
@@ -163,8 +170,13 @@ def arc_features(S, sent, h, d):
         "comma": (between(S.cum_comma, gh, gd) > 0).astype(np.uint64),
         "nverb": np.minimum(between(S.cum_verb, gh, gd), 2).astype(np.uint64),
     }
+    
+    templates = ARC_TEMPLATES
+    if S.D is not None:                                # --dirfeats: add predicted-direction templates
+        a["dsd"], a["hsd"] = S.D[gd], S.D[gh]
+        templates = ARC_TEMPLATES + ARC_DIR_TEMPLATES
     cols = [combine(999, [dd], n)]                     # bias by direction + distance
-    for t, names in enumerate(ARC_TEMPLATES):
+    for t, names in enumerate(templates):
         vals = [a[k] for k in names]
         cols.append(combine(t, vals, n))               # template alone
         cols.append(combine(t + 500, vals + [dd], n))  # template x direction/distance
@@ -180,6 +192,8 @@ REL_TEMPLATES = [
     ("dc", "hc", "gc"), ("hc", "gc", "dir"),            # grandparent (head of the head)
     ("dc", "nch"), ("dw", "nch"), ("dc", "first"), ("dc", "last"), (),
 ]
+# extra templates, only with --dirfeats
+REL_DIR_TEMPLATES = [("dsd", "dir"), ("dc", "dsd", "dir"), ("dsd", "hc", "dir")]
 
 
 def rel_features(S, heads):
@@ -210,7 +224,12 @@ def rel_features(S, heads):
         "first": (d == 1).astype(np.uint64),
         "last": (d == S.lens[sent]).astype(np.uint64),
     }
-    cols = [combine(1000 + t, [a[k] for k in names], n) for t, names in enumerate(REL_TEMPLATES)]
+    
+    templates = REL_TEMPLATES
+    if S.D is not None:                                # --dirfeats: add predicted-direction templates
+        a["dsd"] = S.D[gd]
+        templates = REL_TEMPLATES + REL_DIR_TEMPLATES
+    cols = [combine(1000 + t, [a[k] for k in names], n) for t, names in enumerate(templates)]
 
     # For each child add two features to its head's row:
     # The child's class and its position (left or right).
