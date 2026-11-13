@@ -104,12 +104,15 @@ def viterbi(E, A, start):
 # ---------------------------------------------------------------- the tagger
 class Tagger:
     """Averaged structured perceptron with first-order (tag bigram) transitions."""
+    featurize = staticmethod(token_features)    # feature function; tagger2.py plugs in its own
 
-    def fit(self, sentences, tags, epochs=EPOCHS, seed=SEED):
+    def fit(self, sentences, tags, epochs=EPOCHS, seed=SEED, on_epoch=None):
+        # sentences: list of token lists; tags: list of tag lists (same shapes)
+        # on_epoch: optional callback(epoch, tagger) run with the averaged weights after each epoch
         # sentences: list of token lists; tags: list of tag lists (same shapes)
         self.tags = sorted({t for ts in tags for t in ts})                  # tag set from training only
         self.tag_id = {t: k for k, t in enumerate(self.tags)}
-        feats = [token_features(s) for s in sentences]
+        feats = [self.featurize(s) for s in sentences]
         vocab = {}                                                          # feature string -> row
         for fs in feats:
             for f_word in fs:
@@ -143,6 +146,10 @@ class Tagger:
                     np.add.at(A, (pred[:-1], pred[1:]), -1.0); np.add.at(UA, (pred[:-1], pred[1:]), -c)
                 c += 1
             print(f"  epoch {ep + 1}/{epochs}: {errors / len(F):.1%} sentences with an error")
+            if on_epoch is not None:                     # e.g. measure dev accuracy at this epoch
+                self.W, self.A, self.st = W - U / c, A - UA / c, st - Ust / c
+                self.W[D] = 0.0
+                on_epoch(ep + 1, self)
 
         # averaged weights = w - U / c  (standard lazy-averaging trick)
         self.W = W - U / c
@@ -155,7 +162,7 @@ class Tagger:
         out = []
         unk = len(self.vocab)
         for s in sentences:
-            f = np.array([[self.vocab.get(x, unk) for x in fw] for fw in token_features(s)])
+            f = np.array([[self.vocab.get(x, unk) for x in fw] for fw in self.featurize(s)])
             out.append([self.tags[k] for k in viterbi(self.W[f].sum(1), self.A, self.st)])
         return out
 

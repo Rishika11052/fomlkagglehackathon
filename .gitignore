@@ -39,3 +39,5 @@ submissions/
 experiments/preds/
 models/
 tags/
+tags_v2/
+tags_v2near/

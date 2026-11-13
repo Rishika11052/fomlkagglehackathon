@@ -46,15 +46,17 @@ REL_PARAMS = dict(loss="log_loss", alpha=1e-6, max_iter=10, tol=None, average=Tr
 RUN_NAME = {"sampled": "E3_lr_eisner_relclf", "hard": "E4a_hard_neg", "all": "E4b_all_cand"}
 SUB_NAME = {"sampled": "graph_lr_eisner", "hard": "E4a_hard_neg", "all": "E4b_all_cand"}
 
-TAGS_DIR = ROOT / "tags"
+TAG_DIRS = {"tagger": ROOT / "tags",                # tagger.py (v1)
+            "tagger2": ROOT / "tags_v2",            # tagger2.py
+            "tagger2near": ROOT / "tags_v2near"}    # tagger2.py --neardist
 
 
-def load_tags(df, split):
+def load_tags(df, split, tags_dir):
     """Tagger output for df (split = train_oof / val / test), aligned to df's rows by ID.
-    Returns (rel_class, sdir) arrays: the explicit tag -> feature mapping from tagger.py."""
-    path = TAGS_DIR / f"tags_{split}.csv"
+    Returns (rel_class, sdir) arrays: the explicit tag -> feature mapping written by the tagger."""
+    path = tags_dir / f"tags_{split}.csv"
     if not path.exists():
-        raise FileNotFoundError(f"{path} missing: run `python src/tagger.py` first")
+        raise FileNotFoundError(f"{path} missing: run the matching tagger script first")
     t = pd.read_csv(path, keep_default_na=False).set_index("ID")
     assert set(t.index) == set(df["ID"]), f"{path.name} does not match the {split} rows"
     t = t.loc[df["ID"]]                                   # same order as df
@@ -65,7 +67,12 @@ def run_names(mode, tags, dirfeats):
     # experiment / submission names for each option combination
     if tags == "majority":
         return RUN_NAME[mode], SUB_NAME[mode]
-    name = "E5b_tagger_dirfeats" if dirfeats else "E5a_tagger"
+    if tags == "tagger":
+        name = "E5b_tagger_dirfeats" if dirfeats else "E5a_tagger"
+    elif tags == "tagger2":
+        name = "E6a_tagger2" + ("_dirfeats" if dirfeats else "")
+    else:
+        name = "E6b_tagger2near" + ("_dirfeats" if dirfeats else "")
     if mode != "hard":
         name += f"_{mode}"                                # E5 runs are defined on top of E4a
     return name, name
@@ -249,14 +256,14 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--neg", choices=["sampled", "hard", "all"], default="hard",
                     help="how the arc scorer's negative examples are chosen")
-    ap.add_argument("--tags", choices=["majority", "tagger"], default="majority",
-                    help="word class feature: word-majority relation or the tagger's relation")
+    ap.add_argument("--tags", choices=["majority", "tagger", "tagger2", "tagger2near"], default="majority",
+                    help="word class feature: word-majority relation or a tagger's relation")
     ap.add_argument("--dirfeats", action="store_true",
-                    help="add the tagger's predicted head direction as features (needs --tags tagger)")
+                    help="add the tagger's sdir column (head direction [+ near/far]) as features")
     args = ap.parse_args()
     mode = args.neg
-    if args.dirfeats and args.tags != "tagger":
-        ap.error("--dirfeats needs --tags tagger")
+    if args.dirfeats and args.tags == "majority":
+        ap.error("--dirfeats needs a tagger (--tags tagger / tagger2 / tagger2near)")
     run_name, sub_name = run_names(mode, args.tags, args.dirfeats)
 
     t0 = time.time()
@@ -272,9 +279,10 @@ if __name__ == "__main__":
         cls_te = word_classes(tr, te)
         dir_tr = dir_va = dir_te = None
     else:                                                 # tagger output (also out-of-fold for train)
-        cls_tr, dir_tr = load_tags(tr, "train_oof")
-        cls_va, dir_va = load_tags(va, "val")
-        cls_te, dir_te = load_tags(te, "test")
+        tags_dir = TAG_DIRS[args.tags]
+        cls_tr, dir_tr = load_tags(tr, "train_oof", tags_dir)
+        cls_va, dir_va = load_tags(va, "val", tags_dir)
+        cls_te, dir_te = load_tags(te, "test", tags_dir)
         if not args.dirfeats:
             dir_tr = dir_va = dir_te = None               # E5a: relation part only
     S_tr, S_va, S_te = (Sentences(tr, cls_tr, dir_tr), Sentences(va, cls_va, dir_va),
