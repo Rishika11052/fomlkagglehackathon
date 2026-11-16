@@ -70,7 +70,7 @@ class Sentences:
     """Store each sentence's token attributes in the order [ROOT, w1, ..., wn, EOS] so a
     word's neighbours are just position -1 / +1. Rows keep the order of df."""
 
-    def __init__(self, df, classes, sdir=None):
+    def __init__(self, df, classes, sdir=None, l1=ModuleNotFoundError):
         lens = df.groupby("sentence_id", sort=False).size().to_numpy()   # tokens per sentence
         self.lens = lens
         self.n_sent = len(lens)
@@ -103,6 +103,17 @@ class Sentences:
             dirs[self.row_pos] = sdir                                    # "L", "R" or "ROOT"
             self.D = str_ids(dirs)
 
+
+        self.H1 = None                 # level-1 parser's tree (only for the stacked parser, stack.py)
+        if l1 is not None:
+            l1_heads, l1_rels = l1
+            headpos = self.pad_start[self.sent_of_row] + np.asarray(l1_heads)  # padded pos of level-1 head
+            self.H1 = np.full(P, -1); self.H1[self.row_pos] = headpos          # -1 for ROOT/EOS
+            r1 = np.full(P, EOS, dtype=object); r1[root_pos] = ROOT
+            r1[self.row_pos] = l1_rels
+            self.R1 = str_ids(r1)                                              # level-1 relation
+            self.NCH1 = np.bincount(headpos, minlength=P)                      # level-1 children per position
+        
         self.prev = np.arange(P) - 1; self.prev[root_pos] = root_pos     # left neighbour (ROOT stays ROOT)
         self.next = np.arange(P) + 1; self.next[eos_pos] = eos_pos       # right neighbour (EOS stays EOS)
         real = ~special
@@ -149,6 +160,10 @@ ARC_TEMPLATES = [
 # extra templates, only when Sentences got sdir (--dirfeats): predicted head direction
 ARC_DIR_TEMPLATES = [("dsd",), ("dsd", "hc"), ("dc", "dsd", "hc"), ("hsd", "dsd")]
 
+# extra templates, only for the stacked parser (Sentences got l1): the level-1 tree
+ARC_STACK_TEMPLATES = [("a1",), ("a1", "dc"), ("a1", "r1d"), ("a1", "hc", "r1d"), ("a2", "r1h"),
+                       ("a3", "r1d"), ("a4", "r1d"), ("a1", "a2", "a3", "a4"), ("side1", "r1d"),
+                       ("a1", "nch1h")]
 
 def arc_features(S, sent, h, d):
     """S: Sentences; sent: sentence index per pair; h: head (0 = ROOT); d: dependent (1..n).
@@ -175,6 +190,18 @@ def arc_features(S, sent, h, d):
     if S.D is not None:                                # --dirfeats: add predicted-direction templates
         a["dsd"], a["hsd"] = S.D[gd], S.D[gh]
         templates = ARC_TEMPLATES + ARC_DIR_TEMPLATES
+        
+    if S.H1 is not None:                               # stacked parser: features from the level-1 tree
+        hd1 = S.H1[gd]                                 # level-1 head of the dependent
+        a["a1"] = (hd1 == gh).astype(np.uint64)                   # this arc is in the level-1 tree
+        a["a2"] = (S.H1[gh] == gd).astype(np.uint64)              # level 1 has the reverse arc
+        a["a3"] = (S.H1[hd1] == gh).astype(np.uint64)             # h is d's level-1 grandparent
+        a["a4"] = (S.H1[gh] == hd1).astype(np.uint64)             # h and d are level-1 siblings
+        a["side1"] = (np.sign(hd1 - gh) + 1).astype(np.uint64)    # level-1 head left of / at / right of h
+        a["r1d"], a["r1h"] = S.R1[gd], S.R1[gh]                   # level-1 relations of d and h
+        a["nch1h"] = np.minimum(S.NCH1[gh], 4).astype(np.uint64)  # level-1 children of h
+        templates = templates + ARC_STACK_TEMPLATES
+        
     cols = [combine(999, [dd], n)]                     # bias by direction + distance
     for t, names in enumerate(templates):
         vals = [a[k] for k in names]
@@ -194,7 +221,8 @@ REL_TEMPLATES = [
 ]
 # extra templates, only with --dirfeats
 REL_DIR_TEMPLATES = [("dsd", "dir"), ("dc", "dsd", "dir"), ("dsd", "hc", "dir")]
-
+# extra templates, only for the stacked parser
+REL_STACK_TEMPLATES = [("r1d",), ("r1d", "agree1"), ("r1d", "dc"), ("r1d", "hc", "dir")]
 
 def rel_features(S, heads):
     """One row per token, in the same order as df. heads: head of every token- gold for training,
@@ -229,6 +257,12 @@ def rel_features(S, heads):
     if S.D is not None:                                # --dirfeats: add predicted-direction templates
         a["dsd"] = S.D[gd]
         templates = REL_TEMPLATES + REL_DIR_TEMPLATES
+        
+    if S.H1 is not None:                               # stacked parser: level-1 relation of the word
+        a["r1d"] = S.R1[gd]
+        a["agree1"] = (S.H1[gd] == gh).astype(np.uint64)          # predicted head = level-1 head?
+        templates = templates + REL_STACK_TEMPLATES
+    
     cols = [combine(1000 + t, [a[k] for k in names], n) for t, names in enumerate(templates)]
 
     # For each child add two features to its head's row:
