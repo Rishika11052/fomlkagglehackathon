@@ -1,12 +1,12 @@
 """
-Step 1: Data exploration for the FoML 2026 dependency parsing competition.
+Data exploration
 
 Run from the repo root:
     python src/eda.py
 
 Reads   data/train.csv, data/test.csv, data/sample.csv
-Writes  reports/eda_summary.md   (all numbers, for the report)
-        reports/figures/*.png    (figures, for the report)
+Writes  reports/eda_summary.md   (all numbers for the report)
+        reports/figures/*.png    (figures for the report)
 """
 from pathlib import Path
 from collections import Counter

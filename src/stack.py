@@ -28,6 +28,8 @@ from features import Sentences, rel_features
 from sp_parser import StructPerceptronArc
 from submit import make_submission
 import parser as P
+import features as F
+import sp_parser as SPP
 
 MEMBERS = ["tagger", "tagger2", "tagger2near"]   # same 3 tag sets as E9
 L1_EPOCHS = 5                                     # level-1 perceptron epochs
@@ -152,7 +154,9 @@ def level2(tr, va, te, tags, t0):
     print(f"[{time.time() - t0:.0f}s] level-2 heads: val UAS {(hv == va['head'].to_numpy()).mean():.4f} "
           f"(E9: 0.8390)")
 
-    for name, use_l1 in [("E10a_stacked_arcs", False), ("E10b_stacked", True)]:
+    bits = int(np.log2(F.D_ARC))
+    sfx = "" if bits == 22 else f"_bits{bits}"                  # E10 names stay unchanged at 2^22
+    for name, use_l1 in [("E10a_stacked_arcs" + sfx, False), ("E10b_stacked" + sfx, True)]:
         rv, rt = ensemble_rels(tr, tr_tags, apps, [hv, ht],
                                l1_fit=l1_tr if use_l1 else None,
                                l1_apps=[l1_va, l1_te] if use_l1 else None)
@@ -162,7 +166,7 @@ def level2(tr, va, te, tags, t0):
         print_report(met, by_len, per_rel, top=8)
         log_result(name, met, params={"level1": f"E9 ensemble, {L1_EPOCHS} epochs, out-of-fold",
                                       "level2": "E9 ensemble + level-1 tree features",
-                                      "relations_use_level1": use_l1},
+                                      "relations_use_level1": use_l1, "arc_bits": bits},
                    notes="MAIN: stacked parser")
         save_val_preds(name, out)
         make_submission(te.assign(pred_head=ht, pred_rel=rt), name)
@@ -174,7 +178,10 @@ if __name__ == "__main__":
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--level1", action="store_true", help="build the out-of-fold level-1 trees (once)")
     g.add_argument("--level2", action="store_true", help="train/evaluate the stacked level-2 parser")
+    ap.add_argument("--arc-bits", type=int, default=22,
+                    help="hashed arc-feature columns = 2^bits (22 = as before; 24 = fewer collisions)")
     args = ap.parse_args()
+    F.D_ARC = SPP.D_ARC = 2 ** args.arc_bits             # used by arc_features and the perceptron weights
     t0 = time.time()
     tr, va = train_val()
     te = load_test()
